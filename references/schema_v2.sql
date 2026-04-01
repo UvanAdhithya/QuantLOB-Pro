@@ -8,11 +8,21 @@
 --      derived read models maintained by triggers
 --   3. ACID compliance via explicit transaction boundaries
 --   4. 3NF+ with documented intentional denormalization
+--
+-- EXECUTION ORDER:
+--   1. All tables created first (FK dependencies)
+--   2. All triggers created after all tables exist
+--   3. ALTER operations for demonstration
 -- =====================================================
 
 DROP DATABASE IF EXISTS lob_system;
 CREATE DATABASE lob_system;
 USE lob_system;
+
+
+-- ═════════════════════════════════════════════════════
+-- PHASE 1: CREATE ALL TABLES
+-- ═════════════════════════════════════════════════════
 
 
 -- =====================================================
@@ -86,8 +96,8 @@ CREATE TABLE orders (
 --   - This table IS the source of truth for all order state.
 --   - remaining_after stores the order's remaining qty
 --     AFTER this event, making each event self-describing.
---   - sequence_no provides unambiguous ordering when
---     timestamps collide (sub-microsecond events).
+--   - event_id (AUTO_INCREMENT PK) serves as the monotonic
+--     sequence number for unambiguous event ordering.
 --   - event_timestamp uses DATETIME(6) for microsecond
 --     precision, critical for time-travel queries.
 -- =====================================================
@@ -108,19 +118,9 @@ CREATE TABLE order_events (
     price               DECIMAL(12,4),
     remaining_after     INT,
     event_timestamp     DATETIME(6)    DEFAULT NOW(6),
-    sequence_no         BIGINT         NOT NULL AUTO_INCREMENT UNIQUE,
 
     FOREIGN KEY (order_id) REFERENCES orders(order_id)
 ) ENGINE=InnoDB;
-
--- NOTE: MySQL does not allow AUTO_INCREMENT on non-primary.
--- Alternative: use a generated sequence or application-layer counter.
--- For academic purposes, we use event_id as the sequence proxy
--- since AUTO_INCREMENT on event_id already provides monotonic ordering.
-
--- CORRECTED VERSION (removing duplicate AUTO_INCREMENT):
-ALTER TABLE order_events DROP COLUMN sequence_no;
--- event_id serves as the monotonic sequence number.
 
 
 -- =====================================================
@@ -144,8 +144,14 @@ CREATE TABLE trades (
 ) ENGINE=InnoDB;
 
 
+-- ═════════════════════════════════════════════════════
+-- PHASE 2: CREATE ALL TRIGGERS
+-- (After all tables exist to avoid missing-table errors)
+-- ═════════════════════════════════════════════════════
+
+
 -- =====================================================
--- TRIGGER: Set remaining_quantity on order insert
+-- TRIGGER 1: Set remaining_quantity on order insert
 -- =====================================================
 
 DELIMITER $$
@@ -174,7 +180,8 @@ DELIMITER ;
 
 
 -- =====================================================
--- TRIGGER: Auto-generate ORDER_PLACED event
+-- TRIGGER 2: Auto-generate ORDER_PLACED event
+-- (order_events table now exists at this point)
 -- =====================================================
 
 DELIMITER $$
@@ -197,7 +204,7 @@ DELIMITER ;
 
 
 -- =====================================================
--- TRIGGER: Update derived state on fill events
+-- TRIGGER 3: Update derived state on fill events
 -- =====================================================
 -- This trigger maintains the CQRS read model:
 --   orders.remaining_quantity and orders.status
@@ -228,9 +235,9 @@ END$$
 DELIMITER ;
 
 
--- =====================================================
--- ALTER OPERATIONS (Demonstrating DDL proficiency)
--- =====================================================
+-- ═════════════════════════════════════════════════════
+-- PHASE 3: ALTER OPERATIONS (Demonstrating DDL)
+-- ═════════════════════════════════════════════════════
 
 -- Add a column for trader risk tier
 ALTER TABLE traders ADD COLUMN risk_tier ENUM('LOW','MEDIUM','HIGH') DEFAULT 'LOW';
@@ -242,11 +249,10 @@ ALTER TABLE traders MODIFY email VARCHAR(200);
 ALTER TABLE instruments ADD CONSTRAINT chk_tick_size CHECK (tick_size >= 0.0001);
 
 
--- =====================================================
--- SCHEMA VERIFICATION QUERIES
--- =====================================================
+-- ═════════════════════════════════════════════════════
+-- PHASE 4: SCHEMA VERIFICATION
+-- ═════════════════════════════════════════════════════
 
--- Verify table structure
 DESCRIBE instruments;
 DESCRIBE traders;
 DESCRIBE orders;

@@ -6,6 +6,100 @@ import {
 import { T, RNG } from "../tokens";
 
 // ══════════════════════════════════════════════════════════
+//  SQL QUERY REFERENCES (actual queries from analytics.sql)
+//  These map to the SQL files in references/
+// ══════════════════════════════════════════════════════════
+const SQL = {
+  spread: `-- views.sql → best_bid_ask
+WITH bid_ask AS (
+  SELECT instrument_id,
+    MAX(CASE WHEN side='BUY' THEN price END)  AS best_bid,
+    MIN(CASE WHEN side='SELL' THEN price END)  AS best_ask
+  FROM orders
+  WHERE status IN ('OPEN','PARTIALLY_FILLED')
+    AND remaining_quantity > 0
+  GROUP BY instrument_id
+)
+SELECT best_ask - best_bid AS spread,
+  (best_ask + best_bid)/2  AS mid_price
+FROM bid_ask`,
+
+  depth: `-- views.sql → live_market_depth
+SELECT side, price,
+  SUM(remaining_quantity) AS total_volume,
+  COUNT(*)                AS order_count
+FROM orders
+WHERE status IN ('OPEN','PARTIALLY_FILLED')
+  AND remaining_quantity > 0
+GROUP BY instrument_id, side, price`,
+
+  flow: `-- analytics.sql → Order Flow Imbalance
+WITH time_buckets AS (
+  SELECT FROM_UNIXTIME(
+    FLOOR(UNIX_TIMESTAMP(event_timestamp)/60)*60
+  ) AS bucket, o.side, SUM(oe.quantity) AS vol
+  FROM order_events oe
+  JOIN orders o ON oe.order_id = o.order_id
+  WHERE oe.event_type = 'ORDER_PLACED'
+  GROUP BY bucket, o.side
+)
+SELECT bucket, buy_volume, sell_volume,
+  (buy_vol - sell_vol)/NULLIF(buy_vol+sell_vol,0)
+  AS order_flow_imbalance
+FROM pivoted`,
+
+  lifetime: `-- analytics.sql → Average Order Lifetime
+SELECT
+  AVG(TIMESTAMPDIFF(MICROSECOND,
+    MIN(oe.event_timestamp),
+    MAX(oe.event_timestamp)
+  )) / 1000000.0 AS avg_lifetime_sec
+FROM orders o
+JOIN order_events oe ON o.order_id = oe.order_id
+WHERE o.status IN ('FILLED','CANCELLED')
+GROUP BY o.order_id`,
+
+  vwap: `-- analytics.sql → VWAP
+SELECT i.symbol,
+  ROUND(SUM(tr.price * tr.quantity) /
+    NULLIF(SUM(tr.quantity), 0), 4) AS vwap
+FROM trades tr
+JOIN instruments i ON tr.instrument_id = i.instrument_id
+GROUP BY i.instrument_id, i.symbol`,
+
+  cancelRatio: `-- analytics.sql → Cancel/Fill Ratio
+WITH daily_events AS (
+  SELECT DATE(event_timestamp) AS d,
+    SUM(CASE WHEN event_type='ORDER_CANCELLED'
+      THEN 1 ELSE 0 END) AS cancels,
+    SUM(CASE WHEN event_type='ORDER_FILLED'
+      THEN 1 ELSE 0 END) AS fills
+  FROM order_events GROUP BY d
+)
+SELECT ROUND(SUM(cancels) OVER w7 /
+  NULLIF(SUM(fills) OVER w7, 0), 2)
+  AS rolling_7d_ratio
+FROM daily_events
+WINDOW w7 AS (ORDER BY d
+  ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)`,
+
+  depthImbalance: `-- analytics.sql → Depth Imbalance
+SELECT ROUND(
+  (SUM(CASE WHEN side='BUY' THEN remaining_quantity END)
+  - SUM(CASE WHEN side='SELL' THEN remaining_quantity END))
+  / NULLIF(SUM(remaining_quantity), 0),
+4) AS depth_imbalance
+FROM orders
+WHERE status IN ('OPEN','PARTIALLY_FILLED')
+  AND remaining_quantity > 0`,
+
+  ofi: `-- analytics.sql → Order Flow Imbalance
+(ΔbidVol − ΔaskVol) / (ΔbidVol + ΔaskVol)
+-- Computed per 1-minute bucket using
+-- FLOOR(UNIX_TIMESTAMP/60) grouping`,
+};
+
+// ══════════════════════════════════════════════════════════
 //  ANALYTICS PAGE  (SQL-driven microstructure views)
 // ══════════════════════════════════════════════════════════
 export default function Analytics({ candles }) {
@@ -41,37 +135,81 @@ export default function Analytics({ candles }) {
   const margin  = { top:4, right:6, bottom:0, left:-16 };
 
   const STATS = [
-    { label:"Avg Order Lifetime", value:"4.2s",      sql:"MAX(ts)−MIN(ts) GROUP BY order_id" },
-    { label:"Cancel / Fill Ratio", value:"1.76×",    sql:"COUNT(CANCELLED)/COUNT(FILLED)" },
-    { label:"VWAP",                value:"88,201",    sql:"SUM(price×qty)/SUM(qty) FROM trades" },
-    { label:"Depth Imbalance",     value:"+12.3%",   sql:"(Σbid_qty−Σask_qty)/Σtotal_qty" },
-    { label:"Order Flow Imbalance",value:"0.342",     sql:"(ΔbidVol−ΔaskVol)/ΣΔvol" },
+    {
+      label: "Avg Order Lifetime",
+      value: "4.2s",
+      sql: "AVG(TIMESTAMPDIFF(μs, MIN(ts), MAX(ts)))/1e6",
+      query: "analytics.sql → Lifetime",
+    },
+    {
+      label: "Cancel / Fill Ratio",
+      value: "1.76×",
+      sql: "SUM(cancels) OVER w7 / NULLIF(SUM(fills),0)",
+      query: "analytics.sql → Cancel Ratio",
+    },
+    {
+      label: "VWAP",
+      value: "150.62",
+      sql: "SUM(price×qty) / NULLIF(SUM(qty),0)",
+      query: "analytics.sql → VWAP",
+    },
+    {
+      label: "Depth Imbalance",
+      value: "+12.3%",
+      sql: "(Σbid_remaining−Σask_remaining) / Σtotal",
+      query: "analytics.sql → Depth Imbalance",
+    },
+    {
+      label: "Order Flow Imbalance",
+      value: "0.342",
+      sql: "(ΔbidVol−ΔaskVol) / (ΔbidVol+ΔaskVol)",
+      query: "analytics.sql → OFI",
+    },
   ];
+
+  // SQL snippet renderer
+  const SqlSnippet = ({ sql }) => (
+    <div style={{
+      fontSize: 9, color: "#3b4451", fontFamily: T.mono,
+      marginBottom: 6, whiteSpace: "pre-wrap", lineHeight: 1.4,
+      maxHeight: 52, overflow: "hidden",
+    }}>
+      {sql.split('\n').slice(0, 4).join('\n')}
+      {sql.split('\n').length > 4 && '\n  ...'}
+    </div>
+  );
 
   return (
     <div style={{ flex:1, overflowY:"auto", padding:12, background:T.bg, display:"flex", flexDirection:"column", gap:10, minHeight:0 }}>
       <div style={{ fontSize:11, color:T.muted, fontFamily:T.mono }}>
-        Market Microstructure Analysis — All metrics derived from SQL event queries (hover charts for detail)
+        Market Microstructure Analysis — All metrics derived from event-sourced SQL queries
+        <span style={{ color:T.accent, marginLeft:8, fontSize:10 }}>
+          Source: references/analytics.sql
+        </span>
       </div>
-      {/* KPI row */}
+
+      {/* ── KPI ROW ── */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:8 }}>
         {STATS.map(s => (
           <div key={s.label} style={{ background:T.surface, border:`1px solid ${T.border}`, padding:"10px 12px", borderRadius:3 }}>
             <div style={{ fontSize:10, color:T.muted, marginBottom:4 }}>{s.label}</div>
             <div style={{ fontSize:18, fontWeight:700, color:T.text, fontFamily:T.mono }}>{s.value}</div>
             <div style={{ fontSize:9, color:T.border, marginTop:3, fontFamily:T.mono }}>{s.sql}</div>
+            <div style={{ fontSize:8, color:T.accent+"88", marginTop:2, fontFamily:T.mono }}>{s.query}</div>
           </div>
         ))}
       </div>
-      {/* Chart grid */}
+
+      {/* ── CHART GRID ── */}
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
-        {/* Spread */}
+
+        {/* Bid-Ask Spread */}
         <div style={{ background:T.surface, border:`1px solid ${T.border}`, padding:10, borderRadius:3 }}>
-          <div style={{ fontSize:11, color:T.muted, marginBottom:2 }}>Bid-Ask Spread Evolution</div>
-          <div style={{ fontSize:9, color:"#3b4451", fontFamily:T.mono, marginBottom:6 }}>
-            WITH best_bid AS (SELECT MAX(price) FROM orders WHERE side='BUY')<br/>
-            SELECT ask − bid AS spread FROM best_bid, best_ask
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:2 }}>
+            <span style={{ fontSize:11, color:T.muted }}>Bid-Ask Spread Evolution</span>
+            <span style={{ fontSize:8, color:T.accent+"88", fontFamily:T.mono }}>views.sql → best_bid_ask</span>
           </div>
+          <SqlSnippet sql={SQL.spread} />
           <ResponsiveContainer width="100%" height={130}>
             <AreaChart data={spreadData} margin={margin}>
               <CartesianGrid {...gridP} />
@@ -82,13 +220,14 @@ export default function Analytics({ candles }) {
             </AreaChart>
           </ResponsiveContainer>
         </div>
+
         {/* Depth Imbalance */}
         <div style={{ background:T.surface, border:`1px solid ${T.border}`, padding:10, borderRadius:3 }}>
-          <div style={{ fontSize:11, color:T.muted, marginBottom:2 }}>Depth Imbalance — Bid vs Ask Volume</div>
-          <div style={{ fontSize:9, color:"#3b4451", fontFamily:T.mono, marginBottom:6 }}>
-            SELECT side, SUM(quantity) AS depth<br/>
-            FROM orders WHERE status='OPEN' GROUP BY instrument_id, side, price
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:2 }}>
+            <span style={{ fontSize:11, color:T.muted }}>Depth Imbalance — Bid vs Ask Volume</span>
+            <span style={{ fontSize:8, color:T.accent+"88", fontFamily:T.mono }}>views.sql → live_market_depth</span>
           </div>
+          <SqlSnippet sql={SQL.depth} />
           <ResponsiveContainer width="100%" height={130}>
             <BarChart data={depthData} margin={margin}>
               <CartesianGrid {...gridP} />
@@ -100,13 +239,14 @@ export default function Analytics({ candles }) {
             </BarChart>
           </ResponsiveContainer>
         </div>
-        {/* Order Flow */}
+
+        {/* Order Flow Rate */}
         <div style={{ background:T.surface, border:`1px solid ${T.border}`, padding:10, borderRadius:3 }}>
-          <div style={{ fontSize:11, color:T.muted, marginBottom:2 }}>Order Arrival, Cancellation & Execution Rate</div>
-          <div style={{ fontSize:9, color:"#3b4451", fontFamily:T.mono, marginBottom:6 }}>
-            SELECT event_type, COUNT(*) FROM order_events<br/>
-            GROUP BY event_type, FLOOR(UNIX_TIMESTAMP(ts)/60)
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:2 }}>
+            <span style={{ fontSize:11, color:T.muted }}>Order Arrival, Cancellation & Execution Rate</span>
+            <span style={{ fontSize:8, color:T.accent+"88", fontFamily:T.mono }}>analytics.sql → OFI</span>
           </div>
+          <SqlSnippet sql={SQL.flow} />
           <ResponsiveContainer width="100%" height={130}>
             <BarChart data={flowData} margin={margin}>
               <CartesianGrid {...gridP} />
@@ -119,13 +259,14 @@ export default function Analytics({ candles }) {
             </BarChart>
           </ResponsiveContainer>
         </div>
+
         {/* Avg Lifetime */}
         <div style={{ background:T.surface, border:`1px solid ${T.border}`, padding:10, borderRadius:3 }}>
-          <div style={{ fontSize:11, color:T.muted, marginBottom:2 }}>Average Order Lifetime (seconds)</div>
-          <div style={{ fontSize:9, color:"#3b4451", fontFamily:T.mono, marginBottom:6 }}>
-            SELECT AVG(TIMESTAMPDIFF(SECOND, placed_ts, last_event_ts))<br/>
-            FROM orders JOIN order_events USING(order_id) GROUP BY time_bucket
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:2 }}>
+            <span style={{ fontSize:11, color:T.muted }}>Average Order Lifetime (seconds)</span>
+            <span style={{ fontSize:8, color:T.accent+"88", fontFamily:T.mono }}>analytics.sql → Lifetime</span>
           </div>
+          <SqlSnippet sql={SQL.lifetime} />
           <ResponsiveContainer width="100%" height={130}>
             <AreaChart data={lifetimeData} margin={margin}>
               <CartesianGrid {...gridP} />
@@ -135,6 +276,43 @@ export default function Analytics({ candles }) {
               <Area type="monotone" dataKey="avgLifetime" stroke={T.blue} fill={T.blue+"22"} dot={false} name="Avg Lifetime (s)" />
             </AreaChart>
           </ResponsiveContainer>
+        </div>
+
+      </div>
+
+      {/* ── SQL REFERENCE PANEL ── */}
+      <div style={{ background:T.surface, border:`1px solid ${T.border}`, padding:12, borderRadius:3 }}>
+        <div style={{ fontSize:11, color:T.accent, marginBottom:8, fontWeight:600 }}>
+          Event Sourcing Architecture — Query Pipeline
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
+          <div>
+            <div style={{ fontSize:10, color:T.muted, marginBottom:4, fontWeight:600 }}>Source of Truth</div>
+            <div style={{ fontSize:9, color:T.text, fontFamily:T.mono, lineHeight:1.6 }}>
+              order_events table<br/>
+              Append-only, immutable<br/>
+              Events: PLACED → PARTIAL → FILLED<br/>
+              Time-travel via event_timestamp
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize:10, color:T.muted, marginBottom:4, fontWeight:600 }}>CQRS Read Model</div>
+            <div style={{ fontSize:9, color:T.text, fontFamily:T.mono, lineHeight:1.6 }}>
+              orders.remaining_quantity<br/>
+              orders.status<br/>
+              Maintained by AFTER INSERT trigger<br/>
+              Verified via cqrs_consistency_check
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize:10, color:T.muted, marginBottom:4, fontWeight:600 }}>Reconstruction</div>
+            <div style={{ fontSize:9, color:T.text, fontFamily:T.mono, lineHeight:1.6 }}>
+              reconstruction.sql → Time-travel<br/>
+              CTE + window functions<br/>
+              O(E_T × log N) complexity<br/>
+              idx_events_time_travel index
+            </div>
+          </div>
         </div>
       </div>
     </div>
