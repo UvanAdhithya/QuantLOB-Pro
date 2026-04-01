@@ -112,22 +112,22 @@ export default function CandlestickChart({ candles }) {
             );
           })}
           {/* Crosshair */}
-          {cx !== null && ch_data && (
+            {cx !== null && ch_data && (
             <g>
               <line x1={xOf(cx)} x2={xOf(cx)} y1={PAD.t} y2={sz.h-PAD.b} stroke={T.muted} strokeWidth={0.5} strokeDasharray="3 3" />
-              <rect x={xOf(cx)-68} y={PAD.t+2} width={136} height={50} rx={2} fill={T.surface2} stroke={T.border} strokeWidth={0.5} opacity={0.95} />
-              <text x={xOf(cx)} y={PAD.t+14} textAnchor="middle" fontSize={9} fill={T.muted} fontFamily="JetBrains Mono,monospace">{ch_data.ts}</text>
+              <rect x={xOf(cx)-110} y={PAD.t+2} width={220} height={54} rx={3} fill={T.surface2} stroke={T.border} strokeWidth={0.5} opacity={0.95} />
+              <text x={xOf(cx)} y={PAD.t+15} textAnchor="middle" fontSize={9} fill={T.muted} fontFamily="JetBrains Mono,monospace">{ch_data.ts}</text>
               {[
                 ["O", ch_data.open.toFixed(2),  T.text],
                 ["H", ch_data.high.toFixed(2),  T.bid],
                 ["L", ch_data.low.toFixed(2),   T.ask],
                 ["C", ch_data.close.toFixed(2), ch_data.close >= ch_data.open ? T.bid : T.ask],
               ].map(([k, v, col], i) => (
-                <text key={k} x={xOf(cx) - 48 + i * 34} y={PAD.t + 30} fontSize={9} fontFamily="JetBrains Mono,monospace" fill={col}>
-                  {k}:{v}
+                <text key={k} x={xOf(cx) - 88 + i * 52} y={PAD.t + 32} fontSize={9} fontFamily="JetBrains Mono,monospace" fill={col}>
+                  <tspan fill={T.muted}>{k}:</tspan>{v}
                 </text>
               ))}
-              <text x={xOf(cx)} y={PAD.t+44} textAnchor="middle" fontSize={9} fill={T.muted} fontFamily="JetBrains Mono,monospace">
+              <text x={xOf(cx)} y={PAD.t+47} textAnchor="middle" fontSize={9} fill={T.muted} fontFamily="JetBrains Mono,monospace">
                 Vol:{ch_data.volume.toFixed(2)}
               </text>
             </g>

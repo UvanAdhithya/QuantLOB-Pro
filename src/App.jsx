@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { T, RNG, INSTRUMENTS, BASE, genBook, genTrades, genCandles, genOrders } from "./tokens";
+import { T, RNG, genCandles } from "./tokens";
 import OrderBook from "./components/OrderBook";
 import CandlestickChart from "./components/CandlestickChart";
 import TradesTape from "./components/TradesTape";
@@ -8,52 +8,117 @@ import ReplayBar from "./components/ReplayBar";
 import Analytics from "./components/Analytics";
 
 // ══════════════════════════════════════════════════════════
-//  ROOT DASHBOARD  (LOBDashboard)
+//  INSTRUMENTS from DB (mapped to IDs)
+// ══════════════════════════════════════════════════════════
+const DB_INSTRUMENTS = [
+  { id: 1, symbol: "AAPL",  name: "Apple Inc" },
+  { id: 2, symbol: "GOOG",  name: "Alphabet Inc" },
+  { id: 4, symbol: "TSLA",  name: "Tesla Inc" },
+];
+
+// ══════════════════════════════════════════════════════════
+//  ROOT DASHBOARD  (DB-driven LOB System)
 // ══════════════════════════════════════════════════════════
 export default function App() {
-  const [instrument, setInstrument] = useState("BTC/USDT");
+  const [instrument, setInstrument] = useState(DB_INSTRUMENTS[0]);
   const [page,       setPage]       = useState("trading");    // trading | analytics
   const [mode,       setMode]       = useState("live");       // live | replay
   const [replayIdx,  setReplayIdx]  = useState(0);
-  const TOTAL = 120;
+  const [totalEvents, setTotalEvents] = useState(0);
 
-  const mid0 = BASE[instrument];
-  const [mid,   setMid]   = useState(mid0);
-  const [delta] = useState(-1.22);   // mock 24h change
-  const [book,   setBook]   = useState(() => genBook(mid0,    new RNG(1)));
-  const [trades, setTrades] = useState(() => genTrades(mid0,  new RNG(2)));
-  const [candles]           = useState(() => genCandles(mid0, new RNG(3)));
-  const [orders]            = useState(() => genOrders(mid0,  new RNG(4)));
-  const [clock, setClock]   = useState(() => new Date().toLocaleTimeString([], { hour12:false }));
+  const [mid,    setMid]    = useState(150);
+  const [spread, setSpread] = useState(0);
+  const [book,   setBook]   = useState({ asks: [], bids: [] });
+  const [trades, setTrades] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [analytics, setAnalytics] = useState(null);
+  const [dbConnected, setDbConnected] = useState(false);
+  const [clock,  setClock]  = useState(() => new Date().toLocaleTimeString([], { hour12:false }));
 
-  // ── WebSocket simulation (live mode only) ──
+  // Candles still use mock (trades table doesn't have enough history for OHLCV yet)
+  const [candles] = useState(() => genCandles(150, new RNG(3)));
+
+  // ── Fetch DB data ──
+  const fetchAll = useCallback(async () => {
+    try {
+      // Order book
+      const bookRes = await fetch(`/api/book/${instrument.id}`);
+      if (bookRes.ok) {
+        const bookData = await bookRes.json();
+        setBook({ asks: bookData.asks, bids: bookData.bids });
+        setMid(bookData.mid || 0);
+        setSpread(bookData.spread || 0);
+        setDbConnected(true);
+      }
+
+      // Trades
+      const tradeRes = await fetch(`/api/trades/${instrument.id}?limit=50`);
+      if (tradeRes.ok) {
+        const tradeData = await tradeRes.json();
+        setTrades(tradeData);
+      }
+
+      // Orders
+      const orderRes = await fetch(`/api/orders/${instrument.id}`);
+      if (orderRes.ok) {
+        const orderData = await orderRes.json();
+        setOrders(orderData);
+      }
+
+      // Analytics
+      const analyticsRes = await fetch(`/api/analytics/${instrument.id}`);
+      if (analyticsRes.ok) {
+        const analyticsData = await analyticsRes.json();
+        setAnalytics(analyticsData);
+      }
+    } catch {
+      setDbConnected(false);
+    }
+  }, [instrument.id]);
+
+  // ── Fetch events for replay ──
+  const fetchEvents = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/events/${instrument.id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setEvents(data);
+        setTotalEvents(data.length);
+      }
+    } catch { /* ignore */ }
+  }, [instrument.id]);
+
+  // ── Initial load + polling ──
   useEffect(() => {
-    if (mode !== "live") return;
-    const t = setInterval(() => {
+    fetchAll();
+    fetchEvents();
+    const interval = setInterval(() => {
       setClock(new Date().toLocaleTimeString([], { hour12:false }));
-      setMid(p => {
-        const np = +(p + (Math.random() - 0.498) * p * 0.0003).toFixed(2);
-        // Emit synthetic trade_executed event
-        setTrades(ts => [{
-          id:   Date.now(),
-          price: np,
-          qty:  +((Math.random() * 0.3 + 0.001)).toFixed(4),
-          side: Math.random() > 0.5 ? "BUY" : "SELL",
-          ts:   new Date().toLocaleTimeString([], { hour12:false }),
-        }, ...ts.slice(0, 49)]);
-        // Emit order_book_snapshot delta
-        setBook(b => ({
-          asks: b.asks.map(r => ({ ...r, qty: Math.max(0.001, +(r.qty + (Math.random()-0.5)*0.09).toFixed(4)) })),
-          bids: b.bids.map(r => ({ ...r, qty: Math.max(0.001, +(r.qty + (Math.random()-0.5)*0.09).toFixed(4)) })),
-        }));
-        return np;
-      });
-    }, 500);
-    return () => clearInterval(t);
-  }, [mode]);
+      if (mode === "live") fetchAll();
+    }, 2000); // Poll DB every 2 seconds in live mode
+    return () => clearInterval(interval);
+  }, [fetchAll, fetchEvents, mode]);
 
-  const handleStep = useCallback((d) =>
-    setReplayIdx(i => Math.max(0, Math.min(TOTAL, i + d))), []);
+  // ── Replay: time-travel via event timestamp ──
+  const handleStep = useCallback(async (delta) => {
+    const newIdx = Math.max(0, Math.min(totalEvents - 1, replayIdx + delta));
+    setReplayIdx(newIdx);
+
+    if (events[newIdx]) {
+      // Server returns event_timestamp pre-formatted as "YYYY-MM-DD HH:MM:SS.ffffff"
+      const timestamp = events[newIdx].event_timestamp;
+      try {
+        const res = await fetch(`/api/book/${instrument.id}?at=${encodeURIComponent(timestamp)}`);
+        if (res.ok) {
+          const data = await res.json();
+          setBook({ asks: data.asks, bids: data.bids });
+          setMid(data.mid || 0);
+          setSpread(data.spread || 0);
+        }
+      } catch { /* ignore */ }
+    }
+  }, [replayIdx, totalEvents, events, instrument.id]);
 
   // ── Shared button helper ──
   const NavBtn = ({ label, active, onClick }) => (
@@ -77,28 +142,47 @@ export default function App() {
         <span style={{ fontWeight:700, fontSize:13, color:T.accent, fontFamily:T.mono, letterSpacing:0.5 }}>LOB·SYS</span>
         <Divider />
 
-        {/* Instrument + live price */}
+        {/* Instrument selector (DB-driven) */}
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-          <select value={instrument} onChange={e => setInstrument(e.target.value)}
+          <select
+            value={instrument.id}
+            onChange={e => {
+              const inst = DB_INSTRUMENTS.find(i => i.id === parseInt(e.target.value));
+              if (inst) setInstrument(inst);
+            }}
             style={{ background:"transparent", border:`1px solid ${T.border}`, color:T.text,
               fontSize:12, fontWeight:700, padding:"3px 6px", cursor:"pointer", outline:"none", fontFamily:T.mono }}>
-            {INSTRUMENTS.map(i => <option key={i} style={{ background:T.surface2 }}>{i}</option>)}
+            {DB_INSTRUMENTS.map(i => (
+              <option key={i.id} value={i.id} style={{ background:T.surface2 }}>{i.symbol}</option>
+            ))}
           </select>
           <span style={{ fontSize:18, fontWeight:700, color:T.bid, fontFamily:T.mono }}>
-            {mid.toLocaleString(undefined, { minimumFractionDigits:2, maximumFractionDigits:2 })}
+            {mid ? mid.toLocaleString(undefined, { minimumFractionDigits:2, maximumFractionDigits:2 }) : "—"}
           </span>
-          <span style={{ fontSize:12, color: delta < 0 ? T.ask : T.bid }}>{delta.toFixed(2)}%</span>
+          {spread > 0 && (
+            <span style={{ fontSize:11, color:T.muted, fontFamily:T.mono }}>
+              Spread: {spread.toFixed(2)}
+            </span>
+          )}
         </div>
 
-        {/* 24h stats */}
-        <div style={{ display:"flex", gap:18, fontSize:11, color:T.muted }}>
-          {[["24h High","90,602.01"],["24h Low","87,704.00"],["24h Vol(BTC)","16,283.52"],["Vol(USDT)","1.45B"]].map(([k,v]) => (
-            <div key={k} style={{ display:"flex", flexDirection:"column", gap:1 }}>
-              <span style={{ fontSize:10 }}>{k}</span>
-              <span style={{ color:T.text, fontFamily:T.mono }}>{v}</span>
-            </div>
-          ))}
-        </div>
+        {/* Live stats from analytics */}
+        {analytics && (
+          <div style={{ display:"flex", gap:18, fontSize:11, color:T.muted }}>
+            {[
+              ["VWAP", analytics.vwap?.toFixed(2) || "—"],
+              ["Trades", analytics.tradeCount],
+              ["Volume", analytics.totalVolume],
+              ["Bid Depth", analytics.bidDepth],
+              ["Ask Depth", analytics.askDepth],
+            ].map(([k,v]) => (
+              <div key={k} style={{ display:"flex", flexDirection:"column", gap:1 }}>
+                <span style={{ fontSize:10 }}>{k}</span>
+                <span style={{ color:T.text, fontFamily:T.mono }}>{v}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div style={{ flex:1 }} />
 
@@ -109,18 +193,18 @@ export default function App() {
         </div>
         <Divider />
         <div style={{ display:"flex", gap:6 }}>
-          <NavBtn label="LIVE"   active={mode==="live"}   onClick={() => setMode("live")} />
-          <NavBtn label="REPLAY" active={mode==="replay"} onClick={() => setMode("replay")} />
+          <NavBtn label="LIVE"   active={mode==="live"}   onClick={() => { setMode("live"); fetchAll(); }} />
+          <NavBtn label="REPLAY" active={mode==="replay"} onClick={() => { setMode("replay"); setReplayIdx(0); }} />
         </div>
         <Divider />
 
-        {/* WS status indicator */}
+        {/* DB connection indicator */}
         <div style={{ display:"flex", alignItems:"center", gap:5 }}>
           <div style={{ width:6, height:6, borderRadius:"50%",
-            background: mode==="live" ? T.bid : T.accent,
-            boxShadow: `0 0 5px ${mode==="live" ? T.bid : T.accent}` }} />
+            background: dbConnected ? T.bid : T.ask,
+            boxShadow: `0 0 5px ${dbConnected ? T.bid : T.ask}` }} />
           <span style={{ fontSize:10, color:T.muted, fontFamily:T.mono }}>
-            WS:{mode==="live" ? "CONNECTED" : "REPLAY"}
+            {dbConnected ? "DB:CONNECTED" : "DB:OFFLINE"}
           </span>
         </div>
 
@@ -129,7 +213,7 @@ export default function App() {
 
       {/* ══ REPLAY CONTROL BAR ═══════════════════════════════ */}
       {mode === "replay" && (
-        <ReplayBar idx={replayIdx} total={TOTAL} onStep={handleStep} onClose={() => setMode("live")} />
+        <ReplayBar idx={replayIdx} total={totalEvents} onStep={handleStep} onClose={() => { setMode("live"); fetchAll(); }} />
       )}
 
       {/* ══ BODY ═════════════════════════════════════════════ */}
@@ -152,7 +236,7 @@ export default function App() {
               ))}
               <div style={{ flex:1 }} />
               <span style={{ fontSize:10, color:"#3b4451", fontFamily:T.mono }}>
-                MA(7) · MA(25) · MA(99) · VWAP
+                {instrument.symbol} · VWAP: {analytics?.vwap?.toFixed(2) || "—"}
               </span>
             </div>
 
@@ -161,15 +245,15 @@ export default function App() {
               <CandlestickChart candles={candles} />
             </div>
 
-            {/* Order lifecycle */}
+            {/* Order lifecycle — DB-driven */}
             <OrderLifecycle orders={orders} />
           </div>
 
-          {/* Trades tape */}
+          {/* Trades tape — DB-driven */}
           <TradesTape trades={trades} />
         </div>
       ) : (
-        <Analytics candles={candles} />
+        <Analytics candles={candles} analytics={analytics} />
       )}
     </div>
   );

@@ -102,7 +102,7 @@ WHERE status IN ('OPEN','PARTIALLY_FILLED')
 // ══════════════════════════════════════════════════════════
 //  ANALYTICS PAGE  (SQL-driven microstructure views)
 // ══════════════════════════════════════════════════════════
-export default function Analytics({ candles }) {
+export default function Analytics({ candles, analytics }) {
   const rng = useMemo(() => new RNG(999), []);
 
   const spreadData = useMemo(() => candles.slice(-30).map(c => ({
@@ -134,34 +134,36 @@ export default function Analytics({ candles }) {
   const gridP   = { stroke:T.border, strokeWidth:0.5 };
   const margin  = { top:4, right:6, bottom:0, left:-16 };
 
+  const a = analytics || {};
+
   const STATS = [
     {
       label: "Avg Order Lifetime",
-      value: "4.2s",
+      value: a.avgLifetime ? `${a.avgLifetime}s` : "—",
       sql: "AVG(TIMESTAMPDIFF(μs, MIN(ts), MAX(ts)))/1e6",
       query: "analytics.sql → Lifetime",
     },
     {
       label: "Cancel / Fill Ratio",
-      value: "1.76×",
+      value: a.cancelFillRatio ? `${a.cancelFillRatio}×` : "—",
       sql: "SUM(cancels) OVER w7 / NULLIF(SUM(fills),0)",
       query: "analytics.sql → Cancel Ratio",
     },
     {
       label: "VWAP",
-      value: "150.62",
+      value: a.vwap ? a.vwap.toFixed(2) : "—",
       sql: "SUM(price×qty) / NULLIF(SUM(qty),0)",
       query: "analytics.sql → VWAP",
     },
     {
       label: "Depth Imbalance",
-      value: "+12.3%",
+      value: a.depthImbalance ? `${(parseFloat(a.depthImbalance) * 100).toFixed(1)}%` : "—",
       sql: "(Σbid_remaining−Σask_remaining) / Σtotal",
       query: "analytics.sql → Depth Imbalance",
     },
     {
       label: "Order Flow Imbalance",
-      value: "0.342",
+      value: a.spreadPct ? a.spreadPct.toFixed(4) : "—",
       sql: "(ΔbidVol−ΔaskVol) / (ΔbidVol+ΔaskVol)",
       query: "analytics.sql → OFI",
     },
