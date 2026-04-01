@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+/* ═══════════════════════════════════════════════════
+   CUSTOM THEME — LOB Dashboard Design System
+   ═══════════════════════════════════════════════════ */
+
+@theme {
+  --color-lob-bg: #0b0e11;
+  --color-lob-surface: #161a1e;
+  --color-lob-surface2: #1e2329;
+  --color-lob-border: #2b3139;
+  --color-lob-ask: #f6465d;
+  --color-lob-bid: #0ecb81;
+  --color-lob-text: #eaecef;
+  --color-lob-muted: #848e9c;
+  --color-lob-accent: #f0b90b;
+  --color-lob-blue: #1890ff;
+
+  --font-mono: 'JetBrains Mono', 'Fira Mono', monospace;
+  --font-sans: 'Inter', system-ui, sans-serif;
+}
+
+/* ═══════════════════════════════════════════════════
+   GLOBAL RESETS
+   ═══════════════════════════════════════════════════ */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--color-lob-bg);
+  color: var(--color-lob-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ═══════════════════════════════════════════════════
+   SCROLLBAR STYLING
+   ═══════════════════════════════════════════════════ */
+
+::-webkit-scrollbar {
+  width: 3px;
+  height: 3px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-lob-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-lob-border);
+  border-radius: 2px;
+}
+
+select option {
+  background: var(--color-lob-surface2);
+}
